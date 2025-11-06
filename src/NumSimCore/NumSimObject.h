@@ -41,9 +41,27 @@ namespace NumSimSolver {
             return this->className_;
         }
 
+        inline boost::json::object* GetNumSimSolverJson() const
+        {
+            if (this->numSimSolverJson_)
+            {
+                return this->numSimSolverJson_;
+            }
+
+            return nullptr;
+        }
+
+        inline void SetNumSimSolverJson(boost::json::object& numSimSolverJson)
+        {
+            this->numSimSolverJson_ = &numSimSolverJson;
+        }
+
+    protected:
+        std::string className_;
+
     private:
         std::string objectName_;
-        std::string className_;
+        boost::json::object* numSimSolverJson_ = nullptr;
     };
 
 #define NUMSIM_DEFINE_FACTORY_METHOD(className) \

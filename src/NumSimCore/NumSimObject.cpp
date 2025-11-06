@@ -1,5 +1,5 @@
 #include <iostream>
-#include "NumSimCore/NumSimObject.h"
+#include "NumSimObject.h"
 
 namespace NumSimSolver
 {
