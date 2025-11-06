@@ -11,6 +11,8 @@ from PySide6.QtWidgets import (
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QPainter, QColor, QAction, QKeySequence, QIcon, QPixmap
 from pathlib import Path
+import json
+from datetime import datetime
 
 # VTK 导入
 try:
@@ -247,6 +249,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.current_file_path = None  # 当前打开的文件路径
+        self.version = "1.0.0"  # 版本号
         self.setting_view_dock = None  # Setting View dock widget
         self.config_dock = None  # 配置 dock widget
         self.setting_tree = None  # Setting View 中的树形控件
@@ -409,8 +412,70 @@ class MainWindow(QMainWindow):
         
     def new_file(self):
         """新建文件"""
-        # TODO: 实现新建文件逻辑
-        QMessageBox.information(self, "新建", "新建文件功能待实现")
+        # 选择目录
+        directory = QFileDialog.getExistingDirectory(
+            self,
+            "选择保存目录",
+            "",
+            QFileDialog.ShowDirsOnly | QFileDialog.DontResolveSymlinks
+        )
+        
+        if not directory:
+            # 用户取消了选择
+            return
+        
+        # 构建文件路径
+        file_path = Path(directory) / "NumSimSolver.json"
+        
+        # 检查文件是否已存在
+        if file_path.exists():
+            reply = QMessageBox.question(
+                self,
+                "文件已存在",
+                f"文件 {file_path.name} 已存在，是否覆盖？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if reply == QMessageBox.No:
+                return
+        
+        # 创建版本信息
+        version_info = {
+            "version": self.version,
+            "created": datetime.now().isoformat(),
+            "modified": datetime.now().isoformat(),
+            "application": "NumSimSolver",
+            "format_version": "1.0"
+        }
+        
+        try:
+            # 写入 JSON 文件
+            with open(file_path, 'w', encoding='utf-8') as f:
+                json.dump(version_info, f, indent=4, ensure_ascii=False)
+            
+            # 更新当前文件路径（保存为字符串，方便后续使用）
+            self.current_file_path = str(file_path)
+            
+            # 更新窗口标题
+            self.setWindowTitle(f"NumSimSolver - {file_path.name}")
+            
+            # 确保文件路径变量已正确设置
+            if not self.current_file_path:
+                self.current_file_path = str(file_path)
+            
+            # 显示成功消息
+            self.statusBar().showMessage(f"已创建文件: {file_path}", 3000)
+            QMessageBox.information(
+                self,
+                "新建成功",
+                f"文件已创建:\n{file_path}"
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "错误",
+                f"创建文件失败:\n{str(e)}"
+            )
         
     def open_file(self):
         """打开文件"""
@@ -418,40 +483,158 @@ class MainWindow(QMainWindow):
             self,
             "打开文件",
             "",
-            "所有文件 (*.*)"
+            "JSON 文件 (*.json);;所有文件 (*.*)"
         )
         if file_path:
+            # 设置当前文件路径
             self.current_file_path = file_path
-            # TODO: 实现打开文件逻辑
-            self.statusBar().showMessage(f"已打开: {file_path}", 3000)
+            
+            # 更新窗口标题
+            file_name = Path(file_path).name
+            self.setWindowTitle(f"NumSimSolver - {file_name}")
+            
+            # TODO: 实现打开文件逻辑，加载数据
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+                # TODO: 根据加载的数据恢复应用程序状态
+                self.statusBar().showMessage(f"已打开: {file_path}", 3000)
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "错误",
+                    f"打开文件失败:\n{str(e)}"
+                )
             
     def save_file(self):
         """保存文件"""
         if self.current_file_path:
-            # TODO: 实现保存文件逻辑
-            self.statusBar().showMessage(f"已保存: {self.current_file_path}", 3000)
+            try:
+                # 读取现有文件内容（如果存在）
+                existing_data = {}
+                file_path = Path(self.current_file_path)
+                if file_path.exists():
+                    try:
+                        with open(file_path, 'r', encoding='utf-8') as f:
+                            existing_data = json.load(f)
+                    except:
+                        pass  # 如果读取失败，使用空字典
+                
+                # 收集需要保存的软件数据
+                software_data = self._collect_software_data()
+                
+                # 合并数据（保留版本信息，更新修改时间和数据）
+                save_data = {
+                    **existing_data,  # 保留原有数据
+                    **software_data,  # 添加/更新软件数据
+                    "modified": datetime.now().isoformat(),  # 更新修改时间
+                }
+                
+                # 如果原有数据中没有版本信息，添加它
+                if "version" not in save_data:
+                    save_data["version"] = self.version
+                if "application" not in save_data:
+                    save_data["application"] = "NumSimSolver"
+                if "format_version" not in save_data:
+                    save_data["format_version"] = "1.0"
+                
+                # 写入文件
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(save_data, f, indent=4, ensure_ascii=False)
+                
+                self.statusBar().showMessage(f"已保存: {self.current_file_path}", 3000)
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "错误",
+                    f"保存文件失败:\n{str(e)}"
+                )
         else:
             # 如果没有当前文件路径，调用另存为
             self.save_file_as()
             
     def save_file_as(self):
         """另存为"""
+        # 如果已有文件路径，使用其目录作为默认路径
+        default_path = ""
+        if self.current_file_path:
+            default_path = str(Path(self.current_file_path).parent)
+        
         file_path, _ = QFileDialog.getSaveFileName(
             self,
             "另存为",
-            "",
-            "所有文件 (*.*)"
+            default_path,
+            "JSON 文件 (*.json);;所有文件 (*.*)"
         )
         if file_path:
+            # 确保文件扩展名是 .json
+            if not file_path.endswith('.json'):
+                file_path += '.json'
+            
+            # 设置当前文件路径
             self.current_file_path = file_path
-            # TODO: 实现保存文件逻辑
-            self.statusBar().showMessage(f"已保存: {file_path}", 3000)
+            
+            # 更新窗口标题
+            file_name = Path(file_path).name
+            self.setWindowTitle(f"NumSimSolver - {file_name}")
+            
+            # 保存数据（复用 save_file 的逻辑）
+            try:
+                # 收集需要保存的软件数据
+                software_data = self._collect_software_data()
+                
+                # 创建保存数据
+                save_data = {
+                    **software_data,
+                    "version": self.version,
+                    "created": datetime.now().isoformat(),
+                    "modified": datetime.now().isoformat(),
+                    "application": "NumSimSolver",
+                    "format_version": "1.0"
+                }
+                
+                # 写入文件
+                with open(file_path, 'w', encoding='utf-8') as f:
+                    json.dump(save_data, f, indent=4, ensure_ascii=False)
+                
+                self.statusBar().showMessage(f"已保存: {file_path}", 3000)
+            except Exception as e:
+                QMessageBox.critical(
+                    self,
+                    "错误",
+                    f"保存文件失败:\n{str(e)}"
+                )
+    
+    def _collect_software_data(self):
+        """收集需要保存的软件数据"""
+        data = {
+            # 可以在这里添加需要保存的数据
+            # 例如：设置、视图状态、模型数据等
+            "visual_views": [],
+            "settings": {},
+        }
+        
+        # 收集 Visual View 信息
+        if hasattr(self, 'visual_view_tab_widget') and self.visual_view_tab_widget:
+            visual_views = []
+            for i in range(self.visual_view_tab_widget.count()):
+                tab_title = self.visual_view_tab_widget.tabText(i)
+                visual_views.append({
+                    "title": tab_title,
+                    "index": i
+                })
+            data["visual_views"] = visual_views
+        
+        # 收集设置信息（如果有的话）
+        # TODO: 根据实际需求添加更多数据收集逻辑
+        
+        return data
     
     def create_central_widget(self):
         """创建中央区域（包含 Visual View tab widget）"""
         # 创建 Tab Widget
         tab_widget = QTabWidget()
-        tab_widget.setTabsClosable(True)  # 允许关闭标签
+        tab_widget.setTabsClosable(False)  # 初始时只有一个tab，关闭关闭按钮
         tab_widget.setMovable(True)  # 允许拖拽标签
         tab_widget.tabCloseRequested.connect(self.close_visual_view_tab)
         tab_widget.currentChanged.connect(self.on_tab_changed)  # 监听tab切换
@@ -463,6 +646,13 @@ class MainWindow(QMainWindow):
         
         self.visual_view_tab_widget = tab_widget
         self.setCentralWidget(tab_widget)
+    
+    def update_tab_close_buttons(self):
+        """更新tab关闭按钮的显示状态（只有一个tab时隐藏）"""
+        if self.visual_view_tab_widget:
+            tab_count = self.visual_view_tab_widget.count()
+            # 只有一个tab时隐藏关闭按钮，多个tab时显示
+            self.visual_view_tab_widget.setTabsClosable(tab_count > 1)
     
     def on_tab_changed(self, index):
         """处理tab切换事件，确保VTK widget正确初始化"""
@@ -497,6 +687,9 @@ class MainWindow(QMainWindow):
                     del self.vtk_widgets[tab_title]
                 widget.deleteLater()
             
+            # 更新关闭按钮状态
+            self.update_tab_close_buttons()
+            
     def show_setting_view(self):
         """显示/隐藏设置视图"""
         if self.setting_view_dock:
@@ -524,6 +717,9 @@ class MainWindow(QMainWindow):
         
         # 切换到新创建的 tab
         self.visual_view_tab_widget.setCurrentIndex(self.visual_view_tab_widget.count() - 1)
+        
+        # 更新关闭按钮状态（现在有多个tab，应该显示关闭按钮）
+        self.update_tab_close_buttons()
             
     def show_help(self):
         """显示帮助对话框"""
