@@ -5,9 +5,10 @@ NumSimGui 主窗口
 from PySide6.QtWidgets import (
     QMainWindow, QMenuBar, QStatusBar, QDockWidget,
     QWidget, QMessageBox, QFileDialog, QApplication, QTreeWidget, QTreeWidgetItem, QVBoxLayout,
-    QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QFormLayout, QScrollArea, QToolBar, QPushButton
+    QLabel, QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox, QFormLayout, QScrollArea, QToolBar, QPushButton,
+    QTabWidget
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QFont, QPainter, QColor, QAction, QKeySequence, QIcon, QPixmap
 from pathlib import Path
 
@@ -16,9 +17,192 @@ try:
     from vtkmodules.qt.QVTKRenderWindowInteractor import QVTKRenderWindowInteractor
     import vtk
     VTK_AVAILABLE = True
+    
+    # 创建自定义错误输出窗口来过滤关闭时的OpenGL错误
+    class FilteredVTKOutputWindow(vtk.vtkOutputWindow):
+        def __init__(self):
+            super().__init__()
+            self._closing = False
+        
+        def DisplayErrorText(self, text):
+            # 如果正在关闭，忽略所有OpenGL相关错误
+            if self._closing:
+                if "wglMakeCurrent failed" in text or "句柄无效" in text or "error: 6" in text:
+                    return
+            # 正常情况下的错误仍然输出
+            super().DisplayErrorText(text)
+        
+        def DisplayWarningText(self, text):
+            # 警告也过滤关闭时的错误
+            if self._closing:
+                if "wglMakeCurrent failed" in text or "句柄无效" in text:
+                    return
+            super().DisplayWarningText(text)
+        
+        def DisplayGenericWarningText(self, text):
+            if self._closing:
+                if "wglMakeCurrent failed" in text or "句柄无效" in text:
+                    return
+            super().DisplayGenericWarningText(text)
+        
+        def DisplayDebugText(self, text):
+            if self._closing:
+                if "wglMakeCurrent failed" in text or "句柄无效" in text:
+                    return
+            super().DisplayDebugText(text)
+        
+        def set_closing(self, closing):
+            self._closing = closing
+    
+    # 创建并设置自定义错误输出窗口
+    _filtered_output = FilteredVTKOutputWindow()
+    vtk.vtkOutputWindow.SetInstance(_filtered_output)
+    
 except ImportError:
     VTK_AVAILABLE = False
     print("警告: VTK 未安装，Visual View 将使用占位符")
+    _filtered_output = None
+
+
+class DelayedVTKWidget(QVTKRenderWindowInteractor if VTK_AVAILABLE else QWidget):
+    """延迟初始化的VTK Widget"""
+    
+    def __init__(self, parent=None):
+        if VTK_AVAILABLE:
+            super().__init__(parent)
+            self._vtk_initialized = False
+            self._renderer = None
+            self._actor = None
+        else:
+            QWidget.__init__(self, parent)
+    
+    def showEvent(self, event):
+        """重写showEvent，延迟初始化VTK"""
+        if VTK_AVAILABLE and not self._vtk_initialized:
+            super().showEvent(event)
+            # 使用QTimer延迟初始化，确保窗口完全显示
+            QTimer.singleShot(100, self._initialize_vtk)
+        else:
+            if VTK_AVAILABLE:
+                super().showEvent(event)
+            else:
+                QWidget.showEvent(self, event)
+    
+    def resizeEvent(self, event):
+        """重写resizeEvent，更新VTK窗口大小"""
+        if VTK_AVAILABLE and self._vtk_initialized:
+            super().resizeEvent(event)
+            if self.width() > 0 and self.height() > 0:
+                try:
+                    render_window = self.GetRenderWindow()
+                    if render_window:
+                        render_window.SetSize(self.width(), self.height())
+                except:
+                    pass
+        else:
+            if VTK_AVAILABLE:
+                super().resizeEvent(event)
+            else:
+                QWidget.resizeEvent(self, event)
+    
+    def closeEvent(self, event):
+        """重写closeEvent，清理VTK资源"""
+        # 先标记为已关闭，防止后续操作
+        self._vtk_initialized = False
+        
+        if VTK_AVAILABLE:
+            try:
+                # 停止交互（如果已初始化）
+                if hasattr(self, 'Stop'):
+                    try:
+                        self.Stop()
+                    except:
+                        pass
+                
+                # 清理渲染窗口
+                try:
+                    render_window = self.GetRenderWindow()
+                    if render_window:
+                        # 禁用渲染窗口，避免后续操作
+                        try:
+                            # 设置窗口为未映射状态
+                            render_window.SetMapped(0)
+                            # 移除所有渲染器
+                            render_window.RemoveAllRenderers()
+                            # 禁用渲染
+                            render_window.SetOffScreenRendering(1)
+                            # 释放窗口资源
+                            render_window.SetWindowId(None)
+                        except:
+                            pass
+                except:
+                    pass
+            except Exception:
+                # 忽略所有清理错误
+                pass
+        QWidget.closeEvent(self, event)
+    
+    def cleanup_vtk(self):
+        """清理VTK资源（在窗口销毁前调用）"""
+        if VTK_AVAILABLE and self._vtk_initialized:
+            try:
+                # 停止交互
+                if hasattr(self, 'Stop'):
+                    try:
+                        self.Stop()
+                    except:
+                        pass
+                
+                # 清理渲染窗口
+                try:
+                    render_window = self.GetRenderWindow()
+                    if render_window:
+                        render_window.RemoveAllRenderers()
+                        render_window.Finalize()
+                except:
+                    pass
+                
+                self._vtk_initialized = False
+            except:
+                pass
+    
+    def _initialize_vtk(self):
+        """初始化VTK渲染"""
+        if not VTK_AVAILABLE or self._vtk_initialized:
+            return
+        
+        try:
+            # 确保widget已经显示且大小有效
+            if not self.isVisible() or self.width() <= 0 or self.height() <= 0:
+                # 如果widget不可见或大小无效，再延迟一次
+                QTimer.singleShot(100, self._initialize_vtk)
+                return
+            
+            # 确保widget的父widget也已经显示（特别是tab widget）
+            parent = self.parent()
+            while parent:
+                if hasattr(parent, 'isVisible') and not parent.isVisible():
+                    QTimer.singleShot(100, self._initialize_vtk)
+                    return
+                parent = parent.parent()
+            
+            # 设置窗口大小
+            if self.width() > 0 and self.height() > 0:
+                self.GetRenderWindow().SetSize(self.width(), self.height())
+            
+            # 初始化交互（只在窗口完全准备好后）
+            if not self._vtk_initialized:
+                self.Initialize()
+                self.Start()
+                
+                # 触发渲染
+                self.GetRenderWindow().Render()
+                
+                self._vtk_initialized = True
+        except Exception as e:
+            print(f"警告: VTK初始化失败: {e}")
+            # 如果初始化失败，标记为已初始化以避免无限重试
+            self._vtk_initialized = True
 
 
 class QtLogoWidget(QWidget):
@@ -66,12 +250,10 @@ class MainWindow(QMainWindow):
         self.setting_view_dock = None  # Setting View dock widget
         self.config_dock = None  # 配置 dock widget
         self.setting_tree = None  # Setting View 中的树形控件
-        self.visual_view_docks = []  # Visual View dock widgets 列表
-        self.visual_view_counter = 0  # Visual View 计数器
-        # VTK 相关引用
-        self.current_vtk_widget = None
-        self.current_vtk_renderer = None
-        self.current_vtk_actor = None
+        self.visual_view_tab_widget = None  # Visual View tab widget
+        self.visual_view_counter = 0  # Visual View 计数器（从1开始）
+        # VTK 相关引用（存储所有VTK widget的引用）
+        self.vtk_widgets = {}  # 存储每个Visual View的VTK widget
         self.init_ui()
         
     def init_ui(self):
@@ -91,6 +273,9 @@ class MainWindow(QMainWindow):
         
         # 创建菜单栏
         self.create_menu_bar()
+        
+        # 创建中央区域（包含tab widget）
+        self.create_central_widget()
         
         # 创建停靠窗口
         self.create_dock_widgets()
@@ -261,6 +446,56 @@ class MainWindow(QMainWindow):
             self.current_file_path = file_path
             # TODO: 实现保存文件逻辑
             self.statusBar().showMessage(f"已保存: {file_path}", 3000)
+    
+    def create_central_widget(self):
+        """创建中央区域（包含 Visual View tab widget）"""
+        # 创建 Tab Widget
+        tab_widget = QTabWidget()
+        tab_widget.setTabsClosable(True)  # 允许关闭标签
+        tab_widget.setMovable(True)  # 允许拖拽标签
+        tab_widget.tabCloseRequested.connect(self.close_visual_view_tab)
+        tab_widget.currentChanged.connect(self.on_tab_changed)  # 监听tab切换
+        
+        # 创建第一个 Visual View
+        self.visual_view_counter = 1
+        first_view = self.create_visual_view_widget(view_id="Visual View")
+        tab_widget.addTab(first_view, "Visual View")
+        
+        self.visual_view_tab_widget = tab_widget
+        self.setCentralWidget(tab_widget)
+    
+    def on_tab_changed(self, index):
+        """处理tab切换事件，确保VTK widget正确初始化"""
+        if index < 0 or not self.visual_view_tab_widget:
+            return
+        
+        widget = self.visual_view_tab_widget.widget(index)
+        if widget and VTK_AVAILABLE:
+            # 查找VTK widget
+            vtk_widget = None
+            for child in widget.findChildren(DelayedVTKWidget if VTK_AVAILABLE else QWidget):
+                if isinstance(child, DelayedVTKWidget):
+                    vtk_widget = child
+                    break
+            
+            # 如果VTK widget存在但未初始化，触发初始化
+            if vtk_widget and not getattr(vtk_widget, '_vtk_initialized', False):
+                # 延迟触发初始化
+                QTimer.singleShot(200, vtk_widget._initialize_vtk)
+    
+    def close_visual_view_tab(self, index):
+        """关闭 Visual View tab"""
+        if self.visual_view_tab_widget and self.visual_view_tab_widget.count() > 1:
+            # 至少保留一个 tab
+            widget = self.visual_view_tab_widget.widget(index)
+            tab_title = self.visual_view_tab_widget.tabText(index)
+            self.visual_view_tab_widget.removeTab(index)
+            # 清理 VTK widget
+            if widget:
+                # 查找并清理 VTK widget引用
+                if tab_title in self.vtk_widgets:
+                    del self.vtk_widgets[tab_title]
+                widget.deleteLater()
             
     def show_setting_view(self):
         """显示/隐藏设置视图"""
@@ -268,28 +503,27 @@ class MainWindow(QMainWindow):
             self.setting_view_dock.setVisible(not self.setting_view_dock.isVisible())
         
     def show_visual_view(self):
-        """显示/隐藏可视化视图"""
-        if self.visual_view_docks:
-            first_view = self.visual_view_docks[0]
-            first_view.setVisible(not first_view.isVisible())
+        """显示/隐藏可视化视图（现在通过tab widget显示）"""
+        if self.visual_view_tab_widget:
+            # Tab widget 始终显示，此方法不再需要
+            pass
             
     def new_visual_view(self):
-        """创建新的 Visual View"""
+        """创建新的 Visual View tab"""
+        if not self.visual_view_tab_widget:
+            return
+        
         self.visual_view_counter += 1
         title = f"Visual View {self.visual_view_counter}"
         
-        # 创建新的 Visual View dock widget
-        new_view = self.create_view_dock(title)
-        self.addDockWidget(Qt.RightDockWidgetArea, new_view)
-        self.visual_view_docks.append(new_view)
+        # 创建新的 Visual View widget
+        view_widget = self.create_visual_view_widget(view_id=title)
         
-        # 将新的 dock widget 与已有的第一个 Visual View 放在一起（使用标签页）
-        if len(self.visual_view_docks) > 1:
-            self.tabifyDockWidget(self.visual_view_docks[0], new_view)
+        # 添加到 tab widget
+        self.visual_view_tab_widget.addTab(view_widget, title)
         
-        # 显示新创建的 Visual View
-        new_view.show()
-        new_view.raise_()  # 将其提升到前台
+        # 切换到新创建的 tab
+        self.visual_view_tab_widget.setCurrentIndex(self.visual_view_tab_widget.count() - 1)
             
     def show_help(self):
         """显示帮助对话框"""
@@ -344,12 +578,6 @@ class MainWindow(QMainWindow):
         # 使用 splitDockWidget 来确保可以调整大小
         self.splitDockWidget(self.setting_view_dock, self.config_dock, Qt.Vertical)
         self.config_dock.setVisible(False)  # 初始隐藏
-        
-        # Visual View dock widget（右侧）
-        first_visual_view = self.create_view_dock("Visual View")
-        self.addDockWidget(Qt.RightDockWidgetArea, first_visual_view)
-        self.visual_view_docks.append(first_visual_view)
-        self.visual_view_counter = 1
         
     def create_setting_view_dock(self) -> QDockWidget:
         """创建 Setting View 停靠窗口（带树形控件）"""
@@ -454,7 +682,7 @@ class MainWindow(QMainWindow):
         dock.resize(300, dock.height())
         
         dock.setMinimumHeight(200)
-        dock.setMaximumHeight(400)
+        # dock.setMaximumHeight(400)
 
         # 设置初始高度
         dock.resize(dock.width(), 350)
@@ -499,27 +727,8 @@ class MainWindow(QMainWindow):
         # 添加一个分隔符（空白行）
         self.config_form_layout.addRow(QLabel(""), QLabel(""))
         
-    def create_view_dock(self, title: str) -> QDockWidget:
-        """创建视图停靠窗口"""
-        dock = QDockWidget(title, self)
-        dock.setAllowedAreas(
-            Qt.LeftDockWidgetArea | Qt.RightDockWidgetArea |
-            Qt.TopDockWidgetArea | Qt.BottomDockWidgetArea
-        )
-        
-        # 如果是 Visual View，创建带工具条和 VTK 视图的布局
-        if title == "Visual View" or title.startswith("Visual View"):
-            widget = self.create_visual_view_widget()
-        else:
-            # 其他视图使用简单布局
-            widget = QWidget()
-            widget.setStyleSheet("background-color: white;")
-        
-        dock.setWidget(widget)
-        
-        return dock
     
-    def create_visual_view_widget(self) -> QWidget:
+    def create_visual_view_widget(self, view_id=None) -> QWidget:
         """创建 Visual View 组件（包含工具条和 VTK 视图）"""
         # 创建主容器
         container = QWidget()
@@ -549,28 +758,30 @@ class MainWindow(QMainWindow):
             }
         """)
         
-        # 添加工具条按钮
+        # 添加工具条按钮（连接到当前view_id对应的VTK widget）
+        # 使用默认参数避免lambda闭包问题
         reset_view_btn = QPushButton("Reset View")
-        reset_view_btn.clicked.connect(self.reset_vtk_view)
+        reset_view_btn.clicked.connect(lambda checked, vid=view_id: self.reset_vtk_view_by_id(vid))
         toolbar.addWidget(reset_view_btn)
         
         zoom_in_btn = QPushButton("Zoom In")
-        zoom_in_btn.clicked.connect(self.zoom_in_vtk_view)
+        zoom_in_btn.clicked.connect(lambda checked, vid=view_id: self.zoom_in_vtk_view_by_id(vid))
         toolbar.addWidget(zoom_in_btn)
         
         zoom_out_btn = QPushButton("Zoom Out")
-        zoom_out_btn.clicked.connect(self.zoom_out_vtk_view)
+        zoom_out_btn.clicked.connect(lambda checked, vid=view_id: self.zoom_out_vtk_view_by_id(vid))
         toolbar.addWidget(zoom_out_btn)
         
         toolbar.addSeparator()
         
         wireframe_btn = QPushButton("Wireframe")
-        wireframe_btn.clicked.connect(self.toggle_wireframe)
+        wireframe_btn.clicked.connect(lambda checked, vid=view_id: self.toggle_wireframe_by_id(vid))
         toolbar.addWidget(wireframe_btn)
         
         # 创建 VTK 视图区域
         if VTK_AVAILABLE:
-            vtk_widget = self.create_vtk_view()
+            vtk_widget = DelayedVTKWidget()
+            self.setup_vtk_widget(vtk_widget, view_id)
         else:
             # 如果 VTK 不可用，创建占位符
             vtk_widget = QWidget()
@@ -595,13 +806,10 @@ class MainWindow(QMainWindow):
         container.setLayout(layout)
         return container
     
-    def create_vtk_view(self) -> QWidget:
-        """创建 VTK 渲染视图"""
+    def setup_vtk_widget(self, vtk_widget, view_id=None):
+        """设置VTK widget的渲染内容"""
         if not VTK_AVAILABLE:
-            return QWidget()
-        
-        # 创建 VTK 渲染窗口交互器
-        vtk_widget = QVTKRenderWindowInteractor()
+            return
         
         # 创建 VTK 渲染器
         renderer = vtk.vtkRenderer()
@@ -625,56 +833,191 @@ class MainWindow(QMainWindow):
         
         # 设置渲染器
         vtk_widget.GetRenderWindow().AddRenderer(renderer)
-        vtk_widget.GetRenderWindow().SetSize(800, 600)
         
         # 保存引用以便后续使用
-        self.current_vtk_widget = vtk_widget
-        self.current_vtk_renderer = renderer
-        self.current_vtk_actor = actor
+        vtk_widget._renderer = renderer
+        vtk_widget._actor = actor
         
-        # 初始化交互
-        vtk_widget.Initialize()
-        vtk_widget.Start()
+        # 存储到字典中
+        if view_id is None:
+            view_id = f"view_{len(self.vtk_widgets)}"
+        self.vtk_widgets[view_id] = {
+            'widget': vtk_widget,
+            'renderer': renderer,
+            'actor': actor
+        }
         
-        return vtk_widget
+        # 为了向后兼容，也设置current_*引用（指向第一个）
+        if not hasattr(self, 'current_vtk_widget') or self.current_vtk_widget is None:
+            self.current_vtk_widget = vtk_widget
+            self.current_vtk_renderer = renderer
+            self.current_vtk_actor = actor
+    
+    def get_current_vtk_data(self, view_id=None):
+        """获取指定view_id的VTK数据，如果没有指定则使用当前激活的tab"""
+        if view_id and view_id in self.vtk_widgets:
+            return self.vtk_widgets[view_id]
+        
+        # 如果没有指定view_id，使用当前激活的tab
+        if self.visual_view_tab_widget:
+            current_index = self.visual_view_tab_widget.currentIndex()
+            if current_index >= 0:
+                current_tab_title = self.visual_view_tab_widget.tabText(current_index)
+                if current_tab_title in self.vtk_widgets:
+                    return self.vtk_widgets[current_tab_title]
+        
+        # 如果都没有，返回第一个
+        if self.vtk_widgets:
+            return next(iter(self.vtk_widgets.values()))
+        
+        return None
     
     def reset_vtk_view(self):
-        """重置 VTK 视图"""
-        if VTK_AVAILABLE and hasattr(self, 'current_vtk_renderer'):
-            self.current_vtk_renderer.ResetCamera()
-            if hasattr(self, 'current_vtk_widget'):
-                self.current_vtk_widget.GetRenderWindow().Render()
+        """重置 VTK 视图（使用当前激活的tab）"""
+        vtk_data = self.get_current_vtk_data()
+        if vtk_data:
+            vtk_data['renderer'].ResetCamera()
+            vtk_data['widget'].GetRenderWindow().Render()
+    
+    def reset_vtk_view_by_id(self, view_id):
+        """根据view_id重置VTK视图"""
+        vtk_data = self.get_current_vtk_data(view_id)
+        if vtk_data:
+            vtk_data['renderer'].ResetCamera()
+            vtk_data['widget'].GetRenderWindow().Render()
     
     def zoom_in_vtk_view(self):
-        """放大 VTK 视图"""
-        if VTK_AVAILABLE and hasattr(self, 'current_vtk_renderer'):
-            camera = self.current_vtk_renderer.GetActiveCamera()
+        """放大 VTK 视图（使用当前激活的tab）"""
+        vtk_data = self.get_current_vtk_data()
+        if vtk_data:
+            camera = vtk_data['renderer'].GetActiveCamera()
             camera.Zoom(1.2)
-            if hasattr(self, 'current_vtk_widget'):
-                self.current_vtk_widget.GetRenderWindow().Render()
+            vtk_data['widget'].GetRenderWindow().Render()
+    
+    def zoom_in_vtk_view_by_id(self, view_id):
+        """根据view_id放大VTK视图"""
+        vtk_data = self.get_current_vtk_data(view_id)
+        if vtk_data:
+            camera = vtk_data['renderer'].GetActiveCamera()
+            camera.Zoom(1.2)
+            vtk_data['widget'].GetRenderWindow().Render()
     
     def zoom_out_vtk_view(self):
-        """缩小 VTK 视图"""
-        if VTK_AVAILABLE and hasattr(self, 'current_vtk_renderer'):
-            camera = self.current_vtk_renderer.GetActiveCamera()
+        """缩小 VTK 视图（使用当前激活的tab）"""
+        vtk_data = self.get_current_vtk_data()
+        if vtk_data:
+            camera = vtk_data['renderer'].GetActiveCamera()
             camera.Zoom(0.8)
-            if hasattr(self, 'current_vtk_widget'):
-                self.current_vtk_widget.GetRenderWindow().Render()
+            vtk_data['widget'].GetRenderWindow().Render()
+    
+    def zoom_out_vtk_view_by_id(self, view_id):
+        """根据view_id缩小VTK视图"""
+        vtk_data = self.get_current_vtk_data(view_id)
+        if vtk_data:
+            camera = vtk_data['renderer'].GetActiveCamera()
+            camera.Zoom(0.8)
+            vtk_data['widget'].GetRenderWindow().Render()
     
     def toggle_wireframe(self):
-        """切换线框模式"""
-        if VTK_AVAILABLE and hasattr(self, 'current_vtk_actor'):
-            prop = self.current_vtk_actor.GetProperty()
+        """切换线框模式（使用当前激活的tab）"""
+        vtk_data = self.get_current_vtk_data()
+        if vtk_data and VTK_AVAILABLE:
+            prop = vtk_data['actor'].GetProperty()
             if prop.GetRepresentation() == vtk.VTK_SURFACE:
                 prop.SetRepresentation(vtk.VTK_WIREFRAME)
             else:
                 prop.SetRepresentation(vtk.VTK_SURFACE)
-            if hasattr(self, 'current_vtk_widget'):
-                self.current_vtk_widget.GetRenderWindow().Render()
+            vtk_data['widget'].GetRenderWindow().Render()
+    
+    def toggle_wireframe_by_id(self, view_id):
+        """根据view_id切换线框模式"""
+        vtk_data = self.get_current_vtk_data(view_id)
+        if vtk_data and VTK_AVAILABLE:
+            prop = vtk_data['actor'].GetProperty()
+            if prop.GetRepresentation() == vtk.VTK_SURFACE:
+                prop.SetRepresentation(vtk.VTK_WIREFRAME)
+            else:
+                prop.SetRepresentation(vtk.VTK_SURFACE)
+            vtk_data['widget'].GetRenderWindow().Render()
         
     def create_status_bar(self):
         """创建状态栏"""
         statusbar = QStatusBar()
         statusbar.showMessage("Status Bar")
         self.setStatusBar(statusbar)
+    
+    def closeEvent(self, event):
+        """重写closeEvent，在关闭窗口前清理所有VTK资源"""
+        # 设置VTK错误输出为关闭状态，忽略关闭时的错误
+        if VTK_AVAILABLE and _filtered_output:
+            try:
+                _filtered_output.set_closing(True)
+            except:
+                pass
+        
+        # 先隐藏窗口，避免VTK在窗口关闭时尝试渲染
+        self.hide()
+        
+        # 清理所有VTK widget
+        if VTK_AVAILABLE and hasattr(self, 'vtk_widgets'):
+            for view_id, vtk_data in list(self.vtk_widgets.items()):
+                try:
+                    vtk_widget = vtk_data.get('widget')
+                    if vtk_widget and hasattr(vtk_widget, '_vtk_initialized'):
+                        # 先标记为未初始化，阻止后续操作
+                        vtk_widget._vtk_initialized = False
+                        
+                        try:
+                            # 停止交互
+                            if hasattr(vtk_widget, 'Stop'):
+                                vtk_widget.Stop()
+                        except:
+                            pass
+                        
+                        # 清理渲染窗口（禁用所有操作）
+                        try:
+                            render_window = vtk_widget.GetRenderWindow()
+                            if render_window:
+                                # 设置窗口为未映射状态
+                                try:
+                                    render_window.SetMapped(0)
+                                except:
+                                    pass
+                                
+                                # 禁用渲染
+                                try:
+                                    render_window.SetOffScreenRendering(1)
+                                except:
+                                    pass
+                                
+                                # 移除所有渲染器
+                                try:
+                                    render_window.RemoveAllRenderers()
+                                except:
+                                    pass
+                                
+                                # 释放窗口ID
+                                try:
+                                    render_window.SetWindowId(None)
+                                except:
+                                    pass
+                        except:
+                            pass
+                except Exception:
+                    # 忽略清理时的错误，避免影响窗口关闭
+                    pass
+        
+        # 清空VTK widgets字典
+        if hasattr(self, 'vtk_widgets'):
+            self.vtk_widgets.clear()
+        
+        # 调用父类的closeEvent
+        super().closeEvent(event)
+        
+        # 恢复VTK错误输出（虽然窗口已经关闭）
+        if VTK_AVAILABLE and _filtered_output:
+            try:
+                _filtered_output.set_closing(False)
+            except:
+                pass
 
